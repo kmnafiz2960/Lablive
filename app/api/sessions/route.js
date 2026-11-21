@@ -9,11 +9,11 @@ import {
   readJson,
   requireUser,
   throwIfError,
+  rateLimit,
+  effectiveSession,
   HttpError,
   SESSION_COLUMNS,
 } from '@/lib/server';
-
-
 
 const LANGUAGES = ['python', 'javascript', 'java', 'c', 'cpp', 'other'];
 
@@ -37,7 +37,7 @@ export async function GET(request) {
       .order('created_at', { ascending: false });
     throwIfError(error);
 
-    return ok({ sessions: data });
+    return ok({ sessions: data.map(effectiveSession) });
   } catch (err) {
     return fail(err);
   }
@@ -46,6 +46,8 @@ export async function GET(request) {
 export async function POST(request) {
   try {
     const { supabase, profile } = await requireUser(request, 'teacher');
+    await rateLimit(supabase, 'create_session', 20, 3600);
+
     const body = await readJson(request);
 
     const title = typeof body.title === 'string' ? body.title.trim() : '';
@@ -73,7 +75,7 @@ export async function POST(request) {
         .select(SESSION_COLUMNS)
         .single();
 
-      if (!error) return ok({ session: data }, 201);
+      if (!error) return ok({ session: effectiveSession(data) }, 201);
       if (error.code !== '23505') throwIfError(error); // 23505 = code already used -> try again
     }
 

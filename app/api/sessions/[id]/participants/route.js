@@ -8,6 +8,7 @@ import {
   requireUser,
   requireUuid,
   getSessionOr404,
+  statusClock,
   loadProfiles,
   throwIfError,
   PARTICIPANT_COLUMNS,
@@ -15,15 +16,13 @@ import {
 import { buildSummary } from '@/lib/participants';
 import { sortParticipants } from '@/lib/status';
 
-
-
 export async function GET(request, { params }) {
   try {
     const { supabase } = await requireUser(request, 'teacher');
     const { id } = await params;
     const sessionId = requireUuid(id);
 
-    await getSessionOr404(supabase, sessionId); // 404 if it is not this teacher's session
+    const session = await getSessionOr404(supabase, sessionId); // 404 if not this teacher's session
 
     const { data: rows, error } = await supabase
       .from('participants')
@@ -36,12 +35,12 @@ export async function GET(request, { params }) {
       rows.map((row) => row.student_id)
     );
 
-    const now = Date.now();
+    const clock = statusClock(session); // frozen at the end time once the session has ended
     const participants = sortParticipants(
-      rows.map((row) => buildSummary(row, profiles.get(row.student_id), now))
+      rows.map((row) => buildSummary(row, profiles.get(row.student_id), clock))
     );
 
-    return ok({ participants, server_time: new Date(now).toISOString() });
+    return ok({ participants, server_time: new Date().toISOString() });
   } catch (err) {
     return fail(err);
   }

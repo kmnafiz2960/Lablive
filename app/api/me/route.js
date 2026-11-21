@@ -3,8 +3,6 @@
 
 import { ok, fail, requireUser } from '@/lib/server';
 
-
-
 export async function GET(request) {
   try {
     const { profile } = await requireUser(request);

@@ -1,11 +1,17 @@
 // app/api/sessions/[id]/report/route.js
 // GET /api/sessions/:id/report -> { report }
-// Numbers for the report page.
+// Numbers for the report page. After the session ended, the numbers no longer change.
 
-import { ok, fail, requireUser, requireUuid, getSessionOr404, throwIfError } from '@/lib/server';
+import {
+  ok,
+  fail,
+  requireUser,
+  requireUuid,
+  getSessionOr404,
+  statusClock,
+  throwIfError,
+} from '@/lib/server';
 import { getStatus } from '@/lib/status';
-
-
 
 export async function GET(request, { params }) {
   try {
@@ -13,7 +19,7 @@ export async function GET(request, { params }) {
     const { id } = await params;
     const sessionId = requireUuid(id);
 
-    await getSessionOr404(supabase, sessionId);
+    const session = await getSessionOr404(supabase, sessionId);
 
     const { data: rows, error } = await supabase
       .from('participants')
@@ -21,14 +27,14 @@ export async function GET(request, { params }) {
       .eq('session_id', sessionId);
     throwIfError(error);
 
-    const now = Date.now();
+    const clock = statusClock(session);
     const statusCounts = { coding: 0, idle: 0, stuck: 0, submitted: 0 };
     let submitted = 0;
     let handsRaisedNow = 0;
     let totalMinutes = 0;
 
     for (const row of rows) {
-      statusCounts[getStatus(row, now)] += 1;
+      statusCounts[getStatus(row, clock)] += 1;
 
       if (row.submitted_at) {
         submitted += 1;

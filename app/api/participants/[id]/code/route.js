@@ -1,6 +1,9 @@
 // app/api/participants/[id]/code/route.js
 // PUT /api/participants/:id/code -> { saved_at }
 // Body: { code }. The student's autosave.
+//
+// "Last activity" is decided by the database: it only moves when the code changes
+// by more than spaces and blank lines.
 
 import {
   ok,
@@ -15,8 +18,6 @@ import {
   HttpError,
   MAX_CODE_LENGTH,
 } from '@/lib/server';
-
-
 
 export async function PUT(request, { params }) {
   try {
@@ -40,18 +41,15 @@ export async function PUT(request, { params }) {
     const session = await getSessionOr404(supabase, row.session_id);
     assertSessionOpen(session);
 
-    const now = new Date().toISOString();
-
-    // Only write when something changed, so "last activity" really means "last code change".
     if (code !== row.latest_code) {
       const { error } = await supabase
         .from('participants')
-        .update({ latest_code: code, last_activity_at: now })
+        .update({ latest_code: code })
         .eq('id', participantId);
       throwIfError(error);
     }
 
-    return ok({ saved_at: now });
+    return ok({ saved_at: new Date().toISOString() });
   } catch (err) {
     return fail(err);
   }

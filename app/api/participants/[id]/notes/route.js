@@ -9,10 +9,9 @@ import {
   requireUser,
   requireUuid,
   throwIfError,
+  rateLimit,
   HttpError,
 } from '@/lib/server';
-
-
 
 export async function POST(request, { params }) {
   try {
@@ -35,6 +34,8 @@ export async function POST(request, { params }) {
       }
       lineNumber = n;
     }
+
+    await rateLimit(supabase, 'note', 60, 60);
 
     // The database rules only show this row to the teacher who owns the session.
     const { data: row, error: rowError } = await supabase
