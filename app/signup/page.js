@@ -22,13 +22,28 @@ export default function SignupPage() {
     event.preventDefault();
     setError('');
     setMessage('');
+
+    // Trim the fields the teacher will see, and check the password here too.
+    const cleanFullName = fullName.trim();
+    const cleanStudentId = studentId.trim();
+    if (!cleanFullName) {
+      setError('Please enter your full name.');
+      return;
+    }
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters long.');
+      return;
+    }
+
+    setFullName(cleanFullName);
+    setStudentId(cleanStudentId);
     setSubmitting(true);
 
     try {
       const { data, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { full_name: fullName, student_id: studentId } },
+        options: { data: { full_name: cleanFullName, student_id: cleanStudentId } },
       });
       if (signUpError) throw signUpError;
 
@@ -105,10 +120,11 @@ export default function SignupPage() {
           value={password}
           onChange={(event) => setPassword(event.target.value)}
           autoComplete="new-password"
-          minLength={6}
+          minLength={8}
           required
           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-50 dark:focus:ring-indigo-900"
         />
+        <p className="mt-1 text-xs text-zinc-500">Use at least 8 characters.</p>
 
         {error && (
           <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">

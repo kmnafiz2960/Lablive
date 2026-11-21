@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useAuth } from '@/lib/useAuth';
-import { endSession, getParticipants, getSession } from '@/lib/api';
+import { endSession, getParticipants, getSession, removeParticipant, setJoinLocked } from '@/lib/api';
 import { STATUS_ORDER, getStatus } from '@/lib/status';
 import StatusBadge from '@/components/teacher/StatusBadge';
 
@@ -35,9 +35,49 @@ export default function LiveGrid() {
   const [filter, setFilter] = useState('all');
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [ending, setEnding] = useState(false);
+  const [locking, setLocking] = useState(false);
+  const [removingId, setRemovingId] = useState('');
+  const [muted, setMuted] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
+  const [clockMs, setClockMs] = useState(() => Date.now());
 
   // One poll at a time. The timer simply skips a tick if a request is running.
   const inFlightRef = useRef(false);
+  // The first successful poll sets this. Later new hands make a short beep.
+  const raisedIdsRef = useRef(null);
+  const pollTimerRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const mutedRef = useRef(false);
+  const originalTitleRef = useRef('LabLive');
+
+  // Browsers only allow sound after a click. Make one AudioContext and reuse it.
+  const ensureAudio = useCallback(() => {
+    if (typeof window === 'undefined') return null;
+    const BrowserAudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!BrowserAudioContext) return null;
+    if (!audioContextRef.current) audioContextRef.current = new BrowserAudioContext();
+    if (audioContextRef.current.state === 'suspended') audioContextRef.current.resume();
+    return audioContextRef.current;
+  }, []);
+
+  const playBeep = useCallback(() => {
+    if (mutedRef.current) return;
+    const context = ensureAudio();
+    if (!context) return;
+
+    const now = context.currentTime;
+    const oscillator = context.createOscillator();
+    const volume = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.value = 880;
+    volume.gain.setValueAtTime(0.0001, now);
+    volume.gain.exponentialRampToValueAtTime(0.2, now + 0.01);
+    volume.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+    oscillator.connect(volume);
+    volume.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.16);
+  }, [ensureAudio]);
 
   const loadSession = useCallback(async () => {
     try {
@@ -54,8 +94,24 @@ export default function LiveGrid() {
     inFlightRef.current = true;
     try {
       const result = await getParticipants(id);
-      setParticipants(result.participants ?? []);
+      const nextList = result.participants ?? [];
+      const nextRaised = new Set(
+        nextList
+          .filter((person) => person.hand_raised_at)
+          .map((person) => person.id)
+      );
+
+      // The first poll is the starting point. Later new hands make a beep.
+      const previousRaised = raisedIdsRef.current;
+      if (previousRaised !== null) {
+        const hasNewHand = [...nextRaised].some((personId) => !previousRaised.has(personId));
+        if (hasNewHand) playBeep();
+      }
+      raisedIdsRef.current = nextRaised;
+
+      setParticipants(nextList);
       setServerTime(result.server_time ?? '');
+      setLastUpdatedAt(Date.now());
       setPollError('');
     } catch (err) {
       // Keep the last good grid instead of emptying it.
@@ -63,20 +119,115 @@ export default function LiveGrid() {
     } finally {
       inFlightRef.current = false;
     }
-  }, [id]);
+  }, [id, playBeep]);
+
+  // The first click unlocks WebAudio so a later hand can make a sound.
+  useEffect(() => {
+    function unlockOnFirstClick() {
+      ensureAudio();
+      window.removeEventListener('click', unlockOnFirstClick);
+    }
+    window.addEventListener('click', unlockOnFirstClick);
+    return () => window.removeEventListener('click', unlockOnFirstClick);
+  }, [ensureAudio]);
+
+  useEffect(() => {
+    mutedRef.current = muted;
+  }, [muted]);
+
+  // Remember the normal title so it can be restored when no hands are up.
+  useEffect(() => {
+    originalTitleRef.current = document.title;
+    return () => {
+      document.title = originalTitleRef.current || 'LabLive';
+    };
+  }, []);
+
+  useEffect(() => {
+    const raisedCount = (participants ?? []).filter((person) => person.hand_raised_at).length;
+    document.title =
+      raisedCount > 0
+        ? `(${raisedCount}) hands raised - LabLive`
+        : originalTitleRef.current || 'LabLive';
+  }, [participants]);
+
+  // A once-a-second tick makes "Updated X seconds ago" count up on its own.
+  useEffect(() => {
+    const timer = setInterval(() => setClockMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (authLoading || !id) return;
+
     const first = setTimeout(() => {
       loadSession();
       loadParticipants();
     }, 0);
-    const timer = setInterval(loadParticipants, POLL_MS);
+
+    function startPolling() {
+      if (pollTimerRef.current || document.visibilityState === 'hidden') return;
+      pollTimerRef.current = setInterval(loadParticipants, POLL_MS);
+    }
+
+    function stopPolling() {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    }
+
+    function handleVisibility() {
+      if (document.visibilityState === 'hidden') {
+        stopPolling();
+      } else {
+        loadParticipants();
+        startPolling();
+      }
+    }
+
+    const startTimer = setTimeout(startPolling, 0);
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
       clearTimeout(first);
-      clearInterval(timer);
+      clearTimeout(startTimer);
+      stopPolling();
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [authLoading, id, loadSession, loadParticipants]);
+
+  async function handleToggleLock() {
+    if (!id || !session || ended || locking) return;
+    setLocking(true);
+    setActionError('');
+    try {
+      const result = await setJoinLocked(id, !session.join_locked);
+      setSession(result.session);
+    } catch (err) {
+      setActionError(err.message || 'Could not change the join lock.');
+    } finally {
+      setLocking(false);
+    }
+  }
+
+  async function handleRemove(person) {
+    if (!person?.id || removingId) return;
+    // A simple confirm box keeps an accidental click from removing a student.
+    if (!window.confirm(`Remove ${person.student_name || 'this student'} from this session?`)) {
+      return;
+    }
+    setRemovingId(person.id);
+    setActionError('');
+    try {
+      await removeParticipant(person.id);
+      setRemovingId('');
+      await loadParticipants();
+    } catch (err) {
+      setActionError(err.message || 'Could not remove this student.');
+      setRemovingId('');
+    }
+  }
 
   async function handleEnd() {
     if (!id || session?.status === 'ended') return;
@@ -142,6 +293,10 @@ export default function LiveGrid() {
   const list = participants ?? [];
   const nowMs = serverTime ? new Date(serverTime).getTime() : 0;
   const statusOf = (person) => person.status || getStatus(person, nowMs);
+  const secondsAgo =
+    lastUpdatedAt && clockMs
+      ? Math.max(0, Math.floor((clockMs - lastUpdatedAt) / 1000))
+      : null;
 
   // Counts come from every student, even when a filter is active.
   const counts = { all: list.length, stuck: 0, idle: 0, coding: 0, submitted: 0 };
@@ -174,9 +329,43 @@ export default function LiveGrid() {
           <p className="font-mono text-5xl font-bold tracking-[0.2em] text-zinc-900 dark:text-zinc-50">
             {session.join_code}
           </p>
+          <p className="mt-2 text-sm text-zinc-500">
+            Expires {session.expires_at ? new Date(session.expires_at).toLocaleString() : '—'}
+          </p>
+          <p className="mt-1 text-sm text-zinc-500">
+            Updated{' '}
+            {secondsAgo === null
+              ? '…'
+              : `${secondsAgo} second${secondsAgo === 1 ? '' : 's'} ago`}
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setMuted((value) => !value)}
+            aria-pressed={muted}
+            className="rounded-lg border border-zinc-300 px-4 py-2 font-semibold text-zinc-700 transition-colors hover:border-indigo-400 hover:text-indigo-600 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            {muted ? '🔇 Unmute alerts' : '🔊 Mute alerts'}
+          </button>
+          {session.join_locked && (
+            <span className="rounded-full bg-orange-100 px-3 py-1 text-sm font-semibold text-orange-800 dark:bg-orange-950 dark:text-orange-200">
+              Joining locked
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={handleToggleLock}
+            disabled={ended || locking}
+            className="rounded-lg border border-zinc-300 px-4 py-2 font-semibold text-zinc-700 transition-colors hover:border-indigo-400 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            {locking
+              ? 'Working…'
+              : session.join_locked
+                ? 'Unlock joining'
+                : 'Lock joining'}
+          </button>
           {ended ? (
             <button
               type="button"
@@ -252,12 +441,13 @@ export default function LiveGrid() {
           {actionError}
         </p>
       )}
-      {pollError && (
+      {pollError && participants !== null && (
         <p
           role="alert"
           className="rounded-lg bg-yellow-50 px-3 py-2 text-sm text-yellow-800 dark:bg-yellow-950 dark:text-yellow-200"
         >
-          Refresh failed: {pollError} The last grid is still shown.
+          Connection problem - retrying
+          <span className="mt-1 block text-xs opacity-80">{pollError}</span>
         </p>
       )}
 
@@ -288,8 +478,11 @@ export default function LiveGrid() {
         <p className="py-10 text-center text-zinc-500">Loading students…</p>
       )}
       {participants === null && pollError && (
-        <section className="rounded-2xl border border-dashed border-zinc-300 bg-white p-10 text-center dark:border-zinc-700 dark:bg-zinc-900">
-          <p className="text-red-700 dark:text-red-300">{pollError}</p>
+        <section className="rounded-2xl border border-yellow-200 bg-yellow-50 p-10 text-center dark:border-yellow-900 dark:bg-yellow-950">
+          <p className="font-semibold text-yellow-800 dark:text-yellow-200">
+            Connection problem - retrying
+          </p>
+          <p className="mt-2 text-sm text-yellow-800 dark:text-yellow-300">{pollError}</p>
           <button
             type="button"
             onClick={loadParticipants}
@@ -341,18 +534,34 @@ export default function LiveGrid() {
                 </p>
               )}
 
+              {person.help_message && (
+                <p className="rounded-lg bg-yellow-50 p-2 text-sm text-yellow-900 dark:bg-yellow-950/50 dark:text-yellow-100">
+                  “{person.help_message}”
+                </p>
+              )}
+
               <p className="text-xs text-zinc-500">{person.line_count ?? 0} lines</p>
 
               <pre className="min-h-24 flex-1 overflow-x-auto whitespace-pre-wrap rounded-lg bg-zinc-50 p-3 font-mono text-xs leading-5 text-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
                 {person.code_preview || 'No code yet.'}
               </pre>
 
-              <Link
-                href={`/teacher/session/${id}/student/${person.id}`}
-                className="text-sm font-semibold text-indigo-600 hover:underline"
-              >
-                Open student →
-              </Link>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <Link
+                  href={`/teacher/session/${id}/student/${person.id}`}
+                  className="text-sm font-semibold text-indigo-600 hover:underline"
+                >
+                  Open student →
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => handleRemove(person)}
+                  disabled={removingId === person.id}
+                  className="rounded-lg border border-red-200 px-3 py-1 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950"
+                >
+                  {removingId === person.id ? 'Removing…' : 'Remove'}
+                </button>
+              </div>
             </li>
           ))}
         </ul>

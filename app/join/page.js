@@ -42,7 +42,15 @@ export default function JoinPage() {
       const { participant_id } = await joinSession(cleanCode);
       router.push(`/lab/${participant_id}`);
     } catch (err) {
-      setError(err.message || 'Could not join that session.');
+      if (err?.status === 401) {
+        router.replace('/login');
+        return;
+      }
+      if (err?.status === 429) {
+        setError('Too many requests, wait a moment');
+      } else {
+        setError(err.message || 'Could not join that session.');
+      }
       setJoining(false);
     }
   }
@@ -58,6 +66,10 @@ export default function JoinPage() {
           Signed in as {profile?.full_name || profile?.student_id || 'student'}.
         </p>
       </header>
+
+      <p className="rounded-lg bg-indigo-50 px-3 py-2 text-sm text-indigo-700 dark:bg-indigo-950 dark:text-indigo-200">
+        Your teacher can see your code live during this session.
+      </p>
 
       <form
         onSubmit={handleSubmit}

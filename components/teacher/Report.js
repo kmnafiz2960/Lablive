@@ -7,11 +7,39 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useAuth } from '@/lib/useAuth';
-import { getReport } from '@/lib/api';
+import { getExport, getReport } from '@/lib/api';
 import { STATUS_ORDER } from '@/lib/status';
 import StatusBadge from '@/components/teacher/StatusBadge';
 
 const POLL_MS = 3000;
+
+// Put quotes around every CSV field, including the header row.
+// Double any quotes that are already inside a field.
+function csvCell(value) {
+  const text = value == null ? '' : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildCsv(rows) {
+  const header = ['Name', 'Student ID', 'Status', 'Minutes to submit', 'Lines', 'Notes'];
+  const lines = [header.map(csvCell).join(',')];
+  rows.forEach((student) => {
+    lines.push(
+      [
+        student.student_name,
+        student.student_code,
+        student.status,
+        student.minutes_to_submit,
+        student.line_count,
+        student.notes_count,
+      ]
+        .map(csvCell)
+        .join(',')
+    );
+  });
+  // The BOM makes Excel open the file as UTF-8 instead of guessing.
+  return `\uFEFF${lines.join('\r\n')}`;
+}
 
 export default function Report() {
   const params = useParams();
@@ -20,9 +48,12 @@ export default function Report() {
 
   const [report, setReport] = useState(null);
   const [error, setError] = useState('');
+  const [exportRows, setExportRows] = useState(null);
+  const [exportError, setExportError] = useState('');
 
   // Skip a poll if the previous request is still running.
   const inFlightRef = useRef(false);
+  const exportInFlightRef = useRef(false);
 
   const load = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -39,15 +70,50 @@ export default function Report() {
     }
   }, [id]);
 
+  const loadExport = useCallback(async () => {
+    if (exportInFlightRef.current) return;
+    exportInFlightRef.current = true;
+    try {
+      const result = await getExport(id);
+      setExportRows(result.students ?? []);
+      setExportError('');
+    } catch (err) {
+      // Keep the last good table instead of flashing an empty one.
+      setExportError(err.message || 'Could not load the student list.');
+    } finally {
+      exportInFlightRef.current = false;
+    }
+  }, [id]);
+
   useEffect(() => {
     if (authLoading || !id) return;
-    const first = setTimeout(load, 0);
-    const timer = setInterval(load, POLL_MS);
+    const first = setTimeout(() => {
+      load();
+      loadExport();
+    }, 0);
+    const timer = setInterval(() => {
+      load();
+      loadExport();
+    }, POLL_MS);
     return () => {
       clearTimeout(first);
       clearInterval(timer);
     };
-  }, [authLoading, id, load]);
+  }, [authLoading, id, load, loadExport]);
+
+  function handleDownload() {
+    if (!exportRows) return;
+    const csv = buildCsv(exportRows);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `lablive-report-${id}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
 
   // Loading and error states.
   if (!id) {
@@ -108,6 +174,14 @@ export default function Report() {
           <p className="mt-1 text-sm text-zinc-500">Refreshes every 3 seconds</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleDownload}
+            disabled={!exportRows}
+            className="rounded-lg border border-zinc-300 px-4 py-2 font-semibold text-zinc-700 transition-colors hover:border-indigo-400 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            Download CSV
+          </button>
           <Link
             href={`/teacher/session/${id}`}
             className="rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white hover:bg-indigo-700"
@@ -196,6 +270,77 @@ export default function Report() {
             </li>
           ))}
         </ul>
+      </section>
+
+      <section
+        aria-labelledby="export-heading"
+        className="rounded-2xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 id="export-heading" className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+            Student results
+          </h2>
+          {exportRows === null && !exportError && (
+            <p className="text-sm text-zinc-500">Loading students…</p>
+          )}
+        </div>
+
+        {exportError && (
+          <p
+            role="alert"
+            className="mt-3 rounded-lg bg-yellow-50 px-3 py-2 text-sm text-yellow-800 dark:bg-yellow-950 dark:text-yellow-200"
+          >
+            Student list refresh problem: {exportError} The last table is still shown.
+          </p>
+        )}
+
+        {exportRows?.length === 0 && (
+          <p className="mt-3 text-sm text-zinc-500">No students in the export yet.</p>
+        )}
+
+        {exportRows && exportRows.length > 0 && (
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-700">
+                  <th className="px-3 py-2">Name</th>
+                  <th className="px-3 py-2">Student ID</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Minutes to submit</th>
+                  <th className="px-3 py-2">Lines</th>
+                  <th className="px-3 py-2">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {exportRows.map((student) => (
+                  <tr
+                    key={student.id}
+                    className="border-b border-zinc-100 last:border-0 dark:border-zinc-800"
+                  >
+                    <td className="px-3 py-2 font-medium text-zinc-900 dark:text-zinc-50">
+                      {student.student_name || 'Unknown student'}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">
+                      {student.student_code || '—'}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">
+                      {student.status || '—'}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">
+                      {student.minutes_to_submit ?? '—'}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">
+                      {student.line_count ?? 0}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">
+                      {student.notes_count ?? 0}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </main>
   );
