@@ -3,6 +3,8 @@
 // PATCH /api/sessions/:id -> { session }  the teacher changes it. Body (one or both):
 //         { "status": "ended" }          end the session
 //         { "join_locked": true|false }  stop (or allow) NEW students joining
+// DELETE /api/sessions/:id -> { deleted: true }  the teacher deletes an ENDED session
+//         together with all its students' code, notes and results. This cannot be undone.
 
 import {
   ok,
@@ -13,6 +15,7 @@ import {
   getSessionOr404,
   effectiveSession,
   throwIfError,
+  rateLimit,
   HttpError,
   SESSION_COLUMNS,
 } from '@/lib/server';
@@ -73,6 +76,38 @@ export async function PATCH(request, { params }) {
     throwIfError(error);
 
     return ok({ session: effectiveSession(data) });
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function DELETE(request, { params }) {
+  try {
+    const { supabase, profile } = await requireUser(request, 'teacher');
+    await rateLimit(supabase, 'delete_session', 30, 60);
+
+    const { id } = await params;
+    const sessionId = requireUuid(id);
+
+    const session = await getSessionOr404(supabase, sessionId);
+
+    // Deleting a running lab would destroy the students' work, so end it first.
+    // (A session that ran past its expiry time counts as ended.)
+    if (session.status !== 'ended') {
+      throw new HttpError(409, 'End the session before deleting it.');
+    }
+
+    // The database deletes the students' rows and notes together with the session.
+    const { data, error } = await supabase
+      .from('lab_sessions')
+      .delete()
+      .eq('id', sessionId)
+      .eq('teacher_id', profile.id)
+      .select('id');
+    throwIfError(error);
+    if (!data || data.length === 0) throw new HttpError(404, 'Session not found.');
+
+    return ok({ deleted: true });
   } catch (err) {
     return fail(err);
   }
