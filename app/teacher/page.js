@@ -59,6 +59,12 @@ export default function TeacherSessionsPage() {
           >
             New session
           </Link>
+          <Link
+            href="/teacher/students"
+            className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 hover:border-indigo-400 hover:text-indigo-600 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            Reset a student&apos;s password
+          </Link>
           <button
             type="button"
             onClick={signOut}
