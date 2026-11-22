@@ -90,6 +90,10 @@ export default function LoginPage() {
       </form>
 
       <p className="text-sm text-zinc-500">
+        Forgot your password? Ask your teacher to reset it.
+      </p>
+
+      <p className="text-sm text-zinc-500">
         New here?{' '}
         <Link href="/signup" className="text-indigo-600 hover:underline">
           Sign up as a student
